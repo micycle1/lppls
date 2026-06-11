@@ -45,7 +45,7 @@ Dependencies
  - Python (>= 3.10)
  - CMA-ES (>= 3.3.0)
  - Matplotlib (>= 3.5.0)
- - Numba (>= 0.56.0)
+ - Numba (>= 0.60.0)
  - NumPy (>= 1.23.0)
  - Pandas (>= 1.5.0)
  - SciPy (>= 1.9.0)
@@ -57,6 +57,45 @@ User installation
 ```
 pip install -U lppls
 ```
+
+## Quick start (pandas API)
+Pass a price series with a `DatetimeIndex`, get the LPPLS bubble confidence
+indicators back on the same index:
+
+```python
+import pandas as pd
+from lppls import bubble_confidence, data_loader
+
+data = data_loader.nasdaq_dotcom()
+prices = pd.Series(
+    data["Adj Close"].values, index=pd.to_datetime(data["Date"])
+)
+
+conf = bubble_confidence(prices, seed=42)  # DataFrame on prices.index
+conf[["pos_conf", "neg_conf"]].dropna().plot()
+```
+
+`pos_conf`/`neg_conf` are the fraction of qualified fits signalling a
+positive (peak) or negative (anti-bubble trough) bubble at each date —
+values exist at every `outer_increment`-th bar once `window_size`
+observations are available (use `outer_increment=1` for a dense signal).
+Notable options:
+
+- `time_scale="positions"` (default) runs the fits in trading-day time
+  (t = 0, 1, 2, ...), avoiding weekend/holiday gaps in the log-periodic
+  oscillations; `time_scale="ordinal"` reproduces the legacy calendar-day
+  behavior.
+- `seed=...` makes the whole run deterministic (results are bit-identical
+  regardless of thread count).
+- `return_fits=True` also returns the raw per-window fit matrix for
+  drill-down (`tc`, `m`, `w`, `sse`, ... per nested window).
+- `workers=...` caps the number of CPU threads (default: all cores).
+
+The fitting runs on a numba-compiled kernel (compiled Nelder-Mead with a
+fused linear-parameter solve, parallelized with native threads), which is
+orders of magnitude faster than the legacy `multiprocessing` path. The first
+call pays a few seconds of JIT compilation; the compiled code is cached on
+disk afterwards.
 
 ## Example Use
 ```python

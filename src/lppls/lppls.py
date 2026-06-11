@@ -15,6 +15,9 @@ import xarray as xr
 from typing import Any
 import warnings
 
+from lppls import _kernel
+from lppls import nested as _nested
+
 
 class LPPLS:
     def __init__(self, observations: np.ndarray | pd.DataFrame) -> None:
@@ -36,47 +39,7 @@ class LPPLS:
         filter_conditions_config: dict[str, Any] | None,
     ) -> dict[str, float]:
         """Validate and merge filter condition thresholds for indicators."""
-        defaults: dict[str, float] = {
-            "m_min": 0.0,
-            "m_max": 1.0,
-            "w_min": 2.0,
-            "w_max": 15.0,
-            "O_min": 2.5,
-            "D_min": 0.5,
-            "tc_min_days": 60.0,
-            "tc_max_days": 252.0,
-            "tc_min_frac": 0.5,
-            "tc_max_frac": 0.5,
-        }
-        if filter_conditions_config is None:
-            return defaults
-
-        if not isinstance(filter_conditions_config, dict):
-            raise TypeError(
-                "filter_conditions_config must be a dict[str, float] or None."
-            )
-
-        unknown_keys = set(filter_conditions_config.keys()) - set(defaults.keys())
-        if unknown_keys:
-            raise ValueError(
-                "Unknown filter condition keys: "
-                f"{sorted(unknown_keys)}. Supported keys: {sorted(defaults.keys())}."
-            )
-
-        resolved = defaults.copy()
-        for key, value in filter_conditions_config.items():
-            resolved[key] = float(value)
-
-        if resolved["m_min"] >= resolved["m_max"]:
-            raise ValueError("m_min must be < m_max.")
-        if resolved["w_min"] >= resolved["w_max"]:
-            raise ValueError("w_min must be < w_max.")
-        if resolved["tc_min_days"] < 0 or resolved["tc_max_days"] < 0:
-            raise ValueError("tc_min_days and tc_max_days must be >= 0.")
-        if resolved["tc_min_frac"] < 0 or resolved["tc_max_frac"] < 0:
-            raise ValueError("tc_min_frac and tc_max_frac must be >= 0.")
-
-        return resolved
+        return _nested.resolve_filter_conditions_config(filter_conditions_config)
 
     @staticmethod
     @njit
@@ -187,6 +150,12 @@ class LPPLS:
         if obs is None:
             obs = self.observations
 
+        # Fast path: the numba kernel reimplements the Nelder-Mead search
+        # loop entirely in compiled code. Subclasses overriding
+        # estimate_params/func_restricted keep the scipy path below.
+        if minimizer == "Nelder-Mead" and type(self) is LPPLS:
+            return self._fit_kernel(max_searches, obs)
+
         search_count = 0
         # find bubble
         while search_count < max_searches:
@@ -223,6 +192,37 @@ class LPPLS:
             except Exception:
                 search_count += 1
         return 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+
+    def _fit_kernel(
+        self, max_searches: int, obs: np.ndarray
+    ) -> tuple[float, float, float, float, float, float, float, float, float, float]:
+        """Single fit through the numba kernel (see _kernel.fit_window).
+
+        The RNG is seeded from the global random module so random.seed(...)
+        still drives reproducibility, as with the legacy path.
+        """
+        obs_arr = np.asarray(obs, dtype=np.float64)
+        t = np.ascontiguousarray(obs_arr[0])
+        p = np.ascontiguousarray(obs_arr[1])
+        out = np.zeros(_kernel.N_COLS, dtype=np.float64)
+        state = _kernel.derive_seeds(random.randrange(2**64), 1)[0]
+        _kernel.fit_window(t, p, 0, len(t), max_searches, True, state, out)
+        if out[_kernel.COL_SUCCESS] != 1.0:
+            return 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+        tc = float(out[_kernel.COL_TC])
+        m = float(out[_kernel.COL_M])
+        w = float(out[_kernel.COL_W])
+        a = float(out[_kernel.COL_A])
+        b = float(out[_kernel.COL_B])
+        c = float(out[_kernel.COL_C])
+        c1 = float(out[_kernel.COL_C1])
+        c2 = float(out[_kernel.COL_C2])
+        O = float(out[_kernel.COL_O])
+        D = float(out[_kernel.COL_D])
+        self.coef_ = {
+            "tc": tc, "m": m, "w": w, "a": a, "b": b, "c": c, "c1": c1, "c2": c2
+        }
+        return tc, m, w, a, b, c, c1, c2, O, D
 
     def estimate_params(
         self, observations: np.ndarray, seed: np.ndarray, minimizer: str
@@ -633,6 +633,25 @@ class LPPLS:
         self.filter_conditions_config = self._resolve_filter_conditions_config(
             filter_conditions_config
         )
+
+        # Fast path: numba-threaded kernel instead of multiprocessing.
+        # Subclasses (CMAES/LM/Q) override fit/estimate_params and keep the
+        # Pool path below.
+        if type(self) is LPPLS:
+            obs_arr = np.asarray(self.observations, dtype=np.float64)
+            result = _nested.run_nested_fits(
+                obs_arr[0],
+                obs_arr[1],
+                window_size=window_size,
+                smallest_window_size=smallest_window_size,
+                outer_increment=outer_increment,
+                inner_increment=inner_increment,
+                max_searches=max_searches,
+                workers=workers,
+            )
+            self.indicator_result = _nested.to_legacy_dicts(result)
+            return self.indicator_result
+
         obs_copy = self.observations
         obs_opy_len = len(obs_copy[0]) - window_size
         func = self._func_compute_nested_fits

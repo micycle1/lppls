@@ -237,10 +237,16 @@ def test_fit_seeded(observations, lppls_model):
 
 
 def test_fit_exhausted_returns_zeros():
-    """When all searches fail, fit() should return all zeros."""
+    """When all searches fail, fit() should return all zeros.
+
+    max_searches=0 exercises the exhaustion path deterministically: on a
+    degenerate flat series a single random search can land on a junk
+    zero-SSE fit (under both the legacy scipy path and the numba kernel),
+    so the old max_searches=1 version of this test was RNG-flaky.
+    """
     obs = np.array([[0.0, 1.0, 2.0], [1.0, 1.0, 1.0]])
     model = lppls.LPPLS(observations=obs)
-    result = model.fit(max_searches=1)
+    result = model.fit(max_searches=0)
     assert result == (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 

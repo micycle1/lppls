@@ -12,3 +12,4 @@ example.py
 outcmaes
 
 notebooks/*.csv
+.venv/
